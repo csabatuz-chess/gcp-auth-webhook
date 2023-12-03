@@ -42,6 +42,8 @@ import (
 )
 
 const gcpAuth = "gcp-auth"
+const gcpAuthArgo = "gcp-auth-argo"
+const gcpAuthRegistry = "gcp-auth-registry"
 
 var (
 	runtimeScheme = runtime.NewScheme()
@@ -113,8 +115,11 @@ func createPullSecret(clientset *kubernetes.Clientset, ns *corev1.Namespace, cre
 		return err
 	}
 	for _, s := range secList.Items {
-		if s.Name == gcpAuth {
-			return nil
+		if s.Name == gcpAuth || s.Name == gcpAuthArgo || s.Name == gcpAuthRegistry {
+			err = secrets.Delete(context.TODO(), s.Name, metav1.DeleteOptions{})
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -130,13 +135,25 @@ func createPullSecret(clientset *kubernetes.Clientset, ns *corev1.Namespace, cre
 		}
 	}
 	var dockercfg string
+	var use4token string
 	registries := append(gcr_config.DefaultGCRRegistries[:], gcr_config.DefaultARRegistries[:]...)
 	for _, reg := range registries {
 		dockercfg += fmt.Sprintf(`"https://%s":{"username":"oauth2accesstoken","password":"%s","email":"none"},`, reg, token.AccessToken)
+		if reg == "us-east4-docker.pkg.dev" {
+			use4token = token.AccessToken
+		}
 	}
 	dockercfg = strings.TrimSuffix(dockercfg, ",")
 	data := map[string][]byte{
 		".dockercfg": []byte(fmt.Sprintf(`{%s}`, dockercfg)),
+	}
+	dataArgo := map[string][]byte{
+		"username": []byte("oauth2accesstoken"),
+		"password": []byte(use4token),
+	}
+	dataRegistry := map[string][]byte{
+		"proxyUsername": []byte("oauth2accesstoken"),
+		"proxyPassword": []byte(use4token),
 	}
 	secretObj := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -149,7 +166,44 @@ func createPullSecret(clientset *kubernetes.Clientset, ns *corev1.Namespace, cre
 	if err != nil {
 		return err
 	}
+	argoSecretObj := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: gcpAuthArgo,
+		},
+		Data: dataArgo,
+		Type: "Opaque",
+	}
+	_, err = secrets.Create(context.TODO(), argoSecretObj, metav1.CreateOptions{})
+	if err != nil {
+		return err
+	}
 
+	registrySecretObj := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: gcpAuthRegistry,
+		},
+		Data: dataRegistry,
+		Type: "Opaque",
+	}
+	_, err = secrets.Create(context.TODO(), registrySecretObj, metav1.CreateOptions{})
+	if err != nil {
+		return err
+	}
+
+	serviceaccounts := clientset.CoreV1().ServiceAccounts(ns.Name)
+	saList, err := serviceaccounts.List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	ips := corev1.LocalObjectReference{Name: gcpAuth}
+	for _, sa := range saList.Items {
+		sa.ImagePullSecrets = []corev1.LocalObjectReference{ips}
+		_, err = serviceaccounts.Update(context.TODO(), &sa, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+	}
+	
 	return nil
 }
 
@@ -460,10 +514,48 @@ func updateTicker() {
 	}
 }
 
+func updatePullSecrets() error {
+	cfg, err := rest.InClusterConfig()
+	if err != nil {
+		return fmt.Errorf("getting cluster config: %v", err)
+	}
+	clientset, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("getting clientset: %v", err)
+	}
+
+	// grab credentials from where GCP would normally look
+	ctx := context.Background()
+	creds, err := google.FindDefaultCredentials(ctx)
+	if err != nil {
+		return fmt.Errorf("finding default credentials: %v", err)
+	}
+
+	namespaces, err := clientset.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("listing namespaces: %v", err)
+	}
+	for _, ns := range namespaces.Items {
+		if err := createPullSecret(clientset, &ns, creds); err != nil {
+			log.Printf("creating pull secret: %v", err)
+		}
+	}
+	return nil
+}
+
+func pullSecretTicker() {
+	for range time.Tick(15 * time.Minute) {
+		if err := updatePullSecrets(); err != nil {
+			log.Print(err)
+		}
+	}
+}
+
 func main() {
 	log.Print("GCP Auth Webhook started!")
 
 	go updateTicker()
+	go pullSecretTicker()
 	go func() {
 		if err := watchNamespaces(); err != nil {
 			log.Printf("Failed to watch namespaces, please update minikube and disable/re-enable the gcp-auth addon: %v", err)

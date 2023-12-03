@@ -1,3 +1,12 @@
+FROM golang:1.21.5-alpine as builder
+WORKDIR /build
+RUN apk add make
+COPY go.sum go.mod ./
+RUN go mod download && go mod verify
+
+COPY . .
+RUN make build
+
 # Copyright 2020 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,5 +22,5 @@
 # limitations under the License.
 
 FROM gcr.io/distroless/static:nonroot
-COPY gcp-auth-webhook /gcp-auth-webhook
+COPY --from=builder /build/out/gcp-auth-webhook /gcp-auth-webhook
 ENTRYPOINT ["/gcp-auth-webhook"]
