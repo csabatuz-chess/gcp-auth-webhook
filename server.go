@@ -148,6 +148,7 @@ func createPullSecret(clientset *kubernetes.Clientset, ns *corev1.Namespace, cre
 		".dockercfg": []byte(fmt.Sprintf(`{%s}`, dockercfg)),
 	}
 	dataArgo := map[string][]byte{
+		"url": []byte("us-east4-docker.pkg.dev"),
 		"username": []byte("oauth2accesstoken"),
 		"password": []byte(use4token),
 	}
@@ -169,6 +170,9 @@ func createPullSecret(clientset *kubernetes.Clientset, ns *corev1.Namespace, cre
 	argoSecretObj := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: gcpAuthArgo,
+			Labels: map[string]string {
+				"argocd.argoproj.io/secret-type": "repo-creds",
+			},
 		},
 		Data: dataArgo,
 		Type: "Opaque",
